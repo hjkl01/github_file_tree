@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GitHub File Tree Sidebar Pro
 // @namespace    https://tampermonkey.net/
-// @version      3.1.0
+// @version      3.1.1
 // @description  Modern GitHub repository file tree with caching, SPA support, search and file icons
 // @match        https://github.com/*/*
 // @grant        GM_addStyle
@@ -10,228 +10,50 @@
 (function () {
   'use strict';
 
-  const CONFIG = {
-    defaultWidth: 300,
-    minWidth: 220,
-    maxWidth: 520,
-    cacheTtl: 5 * 60 * 1000,
-    widthKey: 'ghft-width',
-    collapseKey: 'ghft-collapsed',
-    cachePrefix: 'ghft-tree-v1:',
-  };
+  const CONFIG = { defaultWidth:300,minWidth:220,maxWidth:520,cacheTtl:5*60*1000,widthKey:'ghft-width',collapseKey:'ghft-collapsed',cachePrefix:'ghft-tree-v1:' };
+  let sidebarWidth=clamp(Number(localStorage.getItem(CONFIG.widthKey))||CONFIG.defaultWidth,CONFIG.minWidth,CONFIG.maxWidth);
+  let collapsed=localStorage.getItem(CONFIG.collapseKey)==='1';
+  let navigationTimer=null;
+  let searchOpen=null;
 
-  let sidebarWidth = clamp(Number(localStorage.getItem(CONFIG.widthKey)) || CONFIG.defaultWidth, CONFIG.minWidth, CONFIG.maxWidth);
-  let collapsed = localStorage.getItem(CONFIG.collapseKey) === '1';
-  let currentKey = '';
-  let navigationTimer = null;
-
-  function clamp(value, min, max) { return Math.min(max, Math.max(min, value)); }
+  function clamp(v,min,max){return Math.min(max,Math.max(min,v));}
 
   GM_addStyle(`
-    :root {
-      --ghft-bg:#fff; --ghft-panel:#f6f8fa; --ghft-hover:#f0f2f5; --ghft-active:#ddf4ff;
-      --ghft-border:#d8dee4; --ghft-text:#1f2328; --ghft-muted:#656d76; --ghft-accent:#0969da;
-      --ghft-danger:#cf222e; --ghft-shadow:0 12px 36px rgba(31,35,40,.16);
-    }
+    :root{--ghft-bg:#fff;--ghft-panel:#f6f8fa;--ghft-hover:#f0f2f5;--ghft-active:#ddf4ff;--ghft-border:#d8dee4;--ghft-text:#1f2328;--ghft-muted:#656d76;--ghft-accent:#0969da;--ghft-danger:#cf222e;--ghft-shadow:0 12px 36px rgba(31,35,40,.16)}
     @media(prefers-color-scheme:dark){:root{--ghft-bg:#0d1117;--ghft-panel:#161b22;--ghft-hover:#21262d;--ghft-active:#1f6feb33;--ghft-border:#30363d;--ghft-text:#e6edf3;--ghft-muted:#8b949e;--ghft-accent:#58a6ff;--ghft-danger:#ff7b72;--ghft-shadow:0 12px 36px rgba(0,0,0,.4)}}
-    body{padding-left:${collapsed ? 0 : sidebarWidth}px!important;transition:padding-left .2s ease}
+    body{padding-left:${collapsed?0:sidebarWidth}px!important;transition:padding-left .2s ease}
     #ghft{position:fixed;inset:64px auto 0 0;width:${sidebarWidth}px;background:var(--ghft-bg);color:var(--ghft-text);border-right:1px solid var(--ghft-border);z-index:9999;display:flex;flex-direction:column;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:4px 0 18px rgba(0,0,0,.04)}
     #ghft-header{height:54px;min-height:54px;box-sizing:border-box;padding:0 10px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--ghft-border);background:var(--ghft-panel)}
     #ghft-toggle,#ghft-search-btn,#ghft-refresh-btn{width:30px;height:30px;border:1px solid var(--ghft-border);border-radius:7px;background:var(--ghft-bg);color:var(--ghft-text);display:grid;place-items:center;cursor:pointer;flex:0 0 auto;transition:.15s ease}
     #ghft-toggle:hover,#ghft-search-btn:hover,#ghft-refresh-btn:hover{background:var(--ghft-hover);border-color:var(--ghft-muted)}
-    #ghft-title{min-width:0;flex:1} #ghft-repo{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap} #ghft-branch{font-size:11px;color:var(--ghft-muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-    #ghft-body{overflow:auto;flex:1;padding:10px 8px 20px;font-size:13px} #ghft-body::-webkit-scrollbar{width:8px} #ghft-body::-webkit-scrollbar-thumb{background:var(--ghft-border);border-radius:8px}
-    .item{position:relative;min-height:30px;box-sizing:border-box;padding:5px 8px 5px 28px;display:flex;align-items:center;border-radius:6px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;user-select:none;transition:background .12s ease,color .12s ease}
-    .item:hover{background:var(--ghft-hover)} .item.file:hover{color:var(--ghft-accent)} .item.current{background:var(--ghft-active);color:var(--ghft-accent)}
+    #ghft-title{min-width:0;flex:1}#ghft-repo{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#ghft-branch{font-size:11px;color:var(--ghft-muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    #ghft-body{overflow:auto;flex:1;padding:10px 8px 20px;font-size:13px}#ghft-body::-webkit-scrollbar{width:8px}#ghft-body::-webkit-scrollbar-thumb{background:var(--ghft-border);border-radius:8px}
+    .item{position:relative;min-height:30px;box-sizing:border-box;padding:5px 8px 5px 28px;display:flex;align-items:center;border-radius:6px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;user-select:none;transition:background .12s ease,color .12s ease}.item:hover{background:var(--ghft-hover)}.item.file:hover{color:var(--ghft-accent)}.item.current{background:var(--ghft-active);color:var(--ghft-accent)}
     .item::before{position:absolute;left:8px;width:16px;text-align:center}.folder::before{content:'›';color:var(--ghft-muted);font-size:20px;line-height:12px}.folder.open::before{content:'⌄'}.folder::after{content:'📁';position:absolute;left:18px;font-size:12px}.folder{padding-left:42px;font-weight:500}.file::before{content:var(--ghft-icon,'•');font-size:13px}.children{display:none;margin-left:12px;padding-left:7px;border-left:1px solid var(--ghft-border)}.folder.open+.children{display:block}
-    #ghft-resize{position:absolute;right:-3px;top:0;width:6px;height:100%;cursor:ew-resize} #ghft-resize:hover{background:var(--ghft-accent);opacity:.45}
+    #ghft-resize{position:absolute;right:-3px;top:0;width:6px;height:100%;cursor:ew-resize}#ghft-resize:hover{background:var(--ghft-accent);opacity:.45}
     #ghft-status{padding:7px 12px;border-top:1px solid var(--ghft-border);font-size:11px;color:var(--ghft-muted);display:none}.ghft-error{color:var(--ghft-danger)!important}
-    #ghft-float-btn{position:fixed;top:72px;left:10px;width:36px;height:36px;border-radius:9px;background:var(--ghft-bg);border:1px solid var(--ghft-border);color:var(--ghft-text);display:${collapsed ? 'grid' : 'none'};place-items:center;cursor:pointer;z-index:9999;box-shadow:var(--ghft-shadow)}
-    #ghft-search-overlay{position:fixed;inset:0;background:rgba(0,0,0,.18);backdrop-filter:blur(2px);z-index:10000;display:none;align-items:flex-start;justify-content:center;padding-top:15vh}
-    #ghft-search{width:min(650px,calc(100vw - 32px));background:var(--ghft-bg);color:var(--ghft-text);border:1px solid var(--ghft-border);border-radius:12px;box-shadow:var(--ghft-shadow);overflow:hidden}
-    #ghft-search-top{display:flex;align-items:center;border-bottom:1px solid var(--ghft-border);padding:10px 14px;gap:10px} #ghft-search-icon{color:var(--ghft-muted);font-size:18px} #ghft-search input{flex:1;min-width:0;border:0;outline:0;background:transparent;color:var(--ghft-text);font-size:15px;padding:4px} #ghft-search-hint{font-size:11px;color:var(--ghft-muted);border:1px solid var(--ghft-border);padding:2px 6px;border-radius:5px}
-    #ghft-search ul{max-height:440px;overflow:auto;list-style:none;padding:6px;margin:0} #ghft-search li{padding:9px 10px;border-radius:7px;cursor:pointer;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap} #ghft-search li:hover,#ghft-search li.selected{background:var(--ghft-hover);color:var(--ghft-accent)} #ghft-search-empty{padding:22px;text-align:center;color:var(--ghft-muted);font-size:13px}
+    #ghft-float-btn{position:fixed;top:72px;left:10px;width:36px;height:36px;border-radius:9px;background:var(--ghft-bg);border:1px solid var(--ghft-border);color:var(--ghft-text);display:${collapsed?'grid':'none'};place-items:center;cursor:pointer;z-index:9999;box-shadow:var(--ghft-shadow)}
+    #ghft-search-overlay{position:fixed;inset:0;background:rgba(0,0,0,.18);backdrop-filter:blur(2px);z-index:10000;display:none;align-items:flex-start;justify-content:center;padding-top:15vh}#ghft-search{width:min(650px,calc(100vw - 32px));background:var(--ghft-bg);color:var(--ghft-text);border:1px solid var(--ghft-border);border-radius:12px;box-shadow:var(--ghft-shadow);overflow:hidden}#ghft-search-top{display:flex;align-items:center;border-bottom:1px solid var(--ghft-border);padding:10px 14px;gap:10px}#ghft-search-icon{color:var(--ghft-muted);font-size:18px}#ghft-search input{flex:1;min-width:0;border:0;outline:0;background:transparent;color:var(--ghft-text);font-size:15px;padding:4px}#ghft-search-hint{font-size:11px;color:var(--ghft-muted);border:1px solid var(--ghft-border);padding:2px 6px;border-radius:5px}#ghft-search ul{max-height:440px;overflow:auto;list-style:none;padding:6px;margin:0}#ghft-search li{padding:9px 10px;border-radius:7px;cursor:pointer;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#ghft-search li:hover,#ghft-search li.selected{background:var(--ghft-hover);color:var(--ghft-accent)}#ghft-search-empty{padding:22px;text-align:center;color:var(--ghft-muted);font-size:13px}
   `);
 
-  function getRepoContext() {
-    const parts = location.pathname.split('/').filter(Boolean);
-    if (parts.length < 2) return null;
-    const reserved = new Set(['settings','notifications','issues','pulls','actions','projects','security','pulse','network','orgs','users','marketplace','explore','topics','collections','sponsors','login','signup']);
-    if (reserved.has(parts[0]) || reserved.has(parts[1])) return null;
-    return { owner: parts[0], repo: parts[1] };
-  }
+  function getRepoContext(){const parts=location.pathname.split('/').filter(Boolean);if(parts.length<2)return null;const reserved=new Set(['settings','notifications','issues','pulls','actions','projects','security','pulse','network','orgs','users','marketplace','explore','topics','collections','sponsors','login','signup']);if(reserved.has(parts[0])||reserved.has(parts[1]))return null;return{owner:parts[0],repo:parts[1]};}
+  function isRepositoryPage(){return location.hostname==='github.com'&&!!getRepoContext();}
+  function destroy(){searchOpen?.close();searchOpen=null;document.getElementById('ghft')?.remove();document.getElementById('ghft-float-btn')?.remove();document.getElementById('ghft-search-overlay')?.remove();document.body.style.paddingLeft='';}
+  function cacheKey(owner,repo,branch){return `${CONFIG.cachePrefix}${owner}/${repo}/${branch}`;}
+  function readCache(key){try{const v=JSON.parse(localStorage.getItem(key)||'null');return v&&Date.now()-v.time<CONFIG.cacheTtl?v.data:null;}catch{return null;}}
+  function writeCache(key,data){try{localStorage.setItem(key,JSON.stringify({time:Date.now(),data}));}catch{}}
+  async function api(url){const r=await fetch(url,{headers:{Accept:'application/vnd.github+json'}});if(!r.ok){if(r.status===403)throw new Error('GitHub API rate limit reached');if(r.status===404)throw new Error('Repository or branch not found');throw new Error(`GitHub API error: ${r.status}`);}return r.json();}
+  async function loadTree(owner,repo,setStatus){const repoKey=`${CONFIG.cachePrefix}repo:${owner}/${repo}`;let info=readCache(repoKey);if(!info){info=await api(`https://api.github.com/repos/${owner}/${repo}`);writeCache(repoKey,info);}const branch=info.default_branch;const key=cacheKey(owner,repo,branch);const cached=readCache(key);if(cached)return{branch,tree:cached,cached:true,truncated:false};setStatus('Loading repository tree…');const result=await api(`https://api.github.com/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`);if(!Array.isArray(result.tree))throw new Error('Invalid tree response');writeCache(key,result.tree);return{branch,tree:result.tree,cached:false,truncated:!!result.truncated};}
+  function buildTree(list){const root={};list.filter(i=>i.path).forEach(i=>{const parts=i.path.split('/');let cur=root;parts.forEach((p,n)=>{if(!cur[p])cur[p]={type:n===parts.length-1?i.type:'tree',children:{}};cur=cur[p].children;});});return root;}
+  const ICONS={js:'🟨',jsx:'⚛',ts:'🔷',tsx:'⚛',rs:'🦀',go:'🐹',py:'🐍',java:'☕',rb:'💎',php:'🐘',json:'{}',yaml:'≡',yml:'≡',md:'M',css:'#',scss:'#',html:'<>',svg:'◇',sh:'›_',sql:'▦',dockerfile:'◆',env:'•',gitignore:'•',lock:'🔒'};
+  function iconFor(name){const lower=name.toLowerCase();if(ICONS[lower])return ICONS[lower];const ext=lower.includes('.')?lower.split('.').pop():'';return ICONS[ext]||'•';}
+  function render(tree,el,owner,repo,branch,base='',activePath=''){Object.entries(tree).sort((a,b)=>{const ad=a[1].type==='tree',bd=b[1].type==='tree';return ad!==bd?(ad?-1:1):a[0].localeCompare(b[0]);}).forEach(([name,node])=>{const path=base?`${base}/${name}`:name;const div=document.createElement('div');div.className=`item ${node.type==='tree'?'folder':'file'}`;div.textContent=name;div.title=path;if(path===activePath)div.classList.add('current');if(node.type!=='tree')div.style.setProperty('--ghft-icon',`'${iconFor(name)}'`);el.appendChild(div);if(node.type==='tree'){const children=document.createElement('div');children.className='children';el.appendChild(children);div.onclick=e=>{e.stopPropagation();div.classList.toggle('open');};render(node.children,children,owner,repo,branch,path,activePath);}else{div.onclick=e=>{const url=`https://github.com/${owner}/${repo}/blob/${encodeURIComponent(branch)}/${path.split('/').map(encodeURIComponent).join('/')}`;if(e.ctrlKey||e.metaKey||e.shiftKey||e.button===1)window.open(url,'_blank');else location.href=url;};}});}
+  function initSearch(allFiles,owner,repo,branch){const overlay=document.createElement('div');overlay.id='ghft-search-overlay';const box=document.createElement('div');box.id='ghft-search';const top=document.createElement('div');top.id='ghft-search-top';const icon=document.createElement('span');icon.id='ghft-search-icon';icon.textContent='⌕';const input=document.createElement('input');input.placeholder='Search files…';const hint=document.createElement('span');hint.id='ghft-search-hint';hint.textContent='ESC';const ul=document.createElement('ul');top.append(icon,input,hint);box.append(top,ul);overlay.appendChild(box);document.body.appendChild(overlay);let selected=-1;const close=()=>{overlay.style.display='none';input.value='';ul.innerHTML='';selected=-1;};const open=()=>{overlay.style.display='flex';input.focus();};overlay.onclick=e=>{if(e.target===overlay)close();};const update=items=>{items.forEach((x,i)=>x.classList.toggle('selected',i===selected));items[selected]?.scrollIntoView({block:'nearest'});};input.oninput=()=>{ul.innerHTML='';selected=-1;const q=input.value.trim().toLowerCase();if(!q)return;const results=allFiles.filter(f=>f.toLowerCase().includes(q)).sort((a,b)=>{const an=a.toLowerCase().split('/').pop().startsWith(q),bn=b.toLowerCase().split('/').pop().startsWith(q);return an===bn?a.length-b.length:(an?-1:1);}).slice(0,50);if(!results.length){const empty=document.createElement('div');empty.id='ghft-search-empty';empty.textContent='No matching files';ul.appendChild(empty);return;}results.forEach(f=>{const li=document.createElement('li');li.textContent=`${iconFor(f.split('/').pop())}  ${f}`;li.title=f;li.onclick=()=>{location.href=`https://github.com/${owner}/${repo}/blob/${encodeURIComponent(branch)}/${f.split('/').map(encodeURIComponent).join('/')}`;};ul.appendChild(li);});};input.onkeydown=e=>{const items=[...ul.querySelectorAll('li')];if(e.key==='ArrowDown'){e.preventDefault();selected=items.length?(selected+1)%items.length:-1;update(items);}else if(e.key==='ArrowUp'){e.preventDefault();selected=items.length?(selected-1+items.length)%items.length:-1;update(items);}else if(e.key==='Enter'&&selected>=0)items[selected]?.click();else if(e.key==='Escape'){e.preventDefault();close();}};return{open,close};}
+  function setBodyPadding(){document.body.style.paddingLeft=collapsed?'0':`${sidebarWidth}px`;}
 
-  function isRepositoryPage() {
-    const ctx = getRepoContext();
-    return !!ctx && location.hostname === 'github.com';
-  }
+  async function init(){if(!isRepositoryPage()){destroy();return;}const ctx=getRepoContext();const activePath=location.pathname.match(/^\/[^/]+\/[^/]+\/blob\/[^/]+\/(.*)$/)?.[1]||'';destroy();setBodyPadding();const setStatus=(text,warn=false)=>{const el=document.getElementById('ghft-status');if(el){el.textContent=text;el.style.display=text?'block':'none';el.classList.toggle('ghft-error',warn);}};try{const result=await loadTree(ctx.owner,ctx.repo,setStatus);const tree=buildTree(result.tree);const allFiles=result.tree.filter(i=>i.type==='blob').map(i=>i.path);searchOpen=initSearch(allFiles,ctx.owner,ctx.repo,result.branch);if(!collapsed){const sidebar=document.createElement('div');sidebar.id='ghft';const header=document.createElement('div');header.id='ghft-header';const toggle=document.createElement('button');toggle.id='ghft-toggle';toggle.textContent='‹';toggle.title='Collapse sidebar';toggle.onclick=()=>{localStorage.setItem(CONFIG.collapseKey,'1');location.reload();};const title=document.createElement('div');title.id='ghft-title';const repoName=document.createElement('div');repoName.id='ghft-repo';repoName.textContent=`${ctx.owner} / ${ctx.repo}`;const branchName=document.createElement('div');branchName.id='ghft-branch';branchName.textContent=`⎇ ${result.branch}${result.cached?' · cached':''}`;title.append(repoName,branchName);const searchBtn=document.createElement('button');searchBtn.id='ghft-search-btn';searchBtn.textContent='⌕';searchBtn.title='Search (Ctrl/Cmd + P)';searchBtn.onclick=searchOpen.open;const refresh=document.createElement('button');refresh.id='ghft-refresh-btn';refresh.textContent='↻';refresh.title='Refresh tree';refresh.onclick=()=>{localStorage.removeItem(cacheKey(ctx.owner,ctx.repo,result.branch));location.reload();};header.append(toggle,title,searchBtn,refresh);const body=document.createElement('div');body.id='ghft-body';render(tree,body,ctx.owner,ctx.repo,result.branch,'',activePath);const status=document.createElement('div');status.id='ghft-status';sidebar.append(header,body,status);const resize=document.createElement('div');resize.id='ghft-resize';resize.onmousedown=e=>{e.preventDefault();document.body.style.cursor='ew-resize';const move=ev=>{sidebarWidth=clamp(ev.clientX,CONFIG.minWidth,CONFIG.maxWidth);sidebar.style.width=`${sidebarWidth}px`;setBodyPadding();};const up=()=>{localStorage.setItem(CONFIG.widthKey,String(sidebarWidth));document.body.style.cursor='';document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up);};document.addEventListener('mousemove',move);document.addEventListener('mouseup',up);};sidebar.appendChild(resize);document.body.appendChild(sidebar);if(result.truncated)setStatus('Large repository: some files may be missing. Click ↻ to refresh.',true);}const floatBtn=document.createElement('button');floatBtn.id='ghft-float-btn';floatBtn.textContent='›';floatBtn.title='Open file tree';floatBtn.onclick=()=>{localStorage.setItem(CONFIG.collapseKey,'0');location.reload();};document.body.appendChild(floatBtn);}catch(err){console.error('[GitHub File Tree]',err);const body=document.getElementById('ghft-body');if(body){body.innerHTML='';const error=document.createElement('div');error.style.cssText='padding:16px;color:var(--ghft-danger);font-size:13px';error.textContent=`Unable to load file tree: ${err.message}`;body.appendChild(error);}}}
 
-  function destroy() {
-    document.getElementById('ghft')?.remove();
-    document.getElementById('ghft-float-btn')?.remove();
-    document.getElementById('ghft-search-overlay')?.remove();
-    document.getElementById('ghft-status-global')?.remove();
-    document.body.style.paddingLeft = '';
-    currentKey = '';
-  }
-
-  function cacheKey(owner, repo, branch) { return `${CONFIG.cachePrefix}${owner}/${repo}/${branch}`; }
-  function readCache(key) {
-    try {
-      const value = JSON.parse(localStorage.getItem(key) || 'null');
-      return value && Date.now() - value.time < CONFIG.cacheTtl ? value.data : null;
-    } catch { return null; }
-  }
-  function writeCache(key, data) {
-    try { localStorage.setItem(key, JSON.stringify({ time: Date.now(), data })); } catch { /* storage may be unavailable/full */ }
-  }
-
-  async function api(url) {
-    const response = await fetch(url, { headers: { Accept: 'application/vnd.github+json' } });
-    if (!response.ok) {
-      if (response.status === 403) throw new Error('GitHub API rate limit reached');
-      if (response.status === 404) throw new Error('Repository or branch not found');
-      throw new Error(`GitHub API error: ${response.status}`);
-    }
-    return response.json();
-  }
-
-  async function loadTree(owner, repo, setStatus) {
-    const repoKey = `${CONFIG.cachePrefix}repo:${owner}/${repo}`;
-    let repoInfo = readCache(repoKey);
-    if (!repoInfo) { repoInfo = await api(`https://api.github.com/repos/${owner}/${repo}`); writeCache(repoKey, repoInfo); }
-    const branch = repoInfo.default_branch;
-    const key = cacheKey(owner, repo, branch);
-    const cached = readCache(key);
-    if (cached) return { branch, tree: cached, cached: true };
-    setStatus('Loading repository tree…');
-    const result = await api(`https://api.github.com/repos/${owner}/${repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`);
-    if (!Array.isArray(result.tree)) throw new Error('Invalid tree response');
-    if (result.truncated) setStatus('Large repository: tree is truncated. Some files may be missing.', true);
-    writeCache(key, result.tree);
-    return { branch, tree: result.tree, cached: false, truncated: !!result.truncated };
-  }
-
-  function buildTree(list) {
-    const root = {};
-    list.filter(i => i.path).forEach(i => {
-      const parts = i.path.split('/'); let cur = root;
-      parts.forEach((part, index) => {
-        if (!cur[part]) cur[part] = { type: index === parts.length - 1 ? i.type : 'tree', children: {} };
-        cur = cur[part].children;
-      });
-    });
-    return root;
-  }
-
-  const ICONS = {
-    js:'🟨', jsx:'⚛', ts:'🔷', tsx:'⚛', rs:'🦀', go:'🐹', py:'🐍', java:'☕', rb:'💎', php:'🐘',
-    json:'{}', yaml:'≡', yml:'≡', md:'M', css:'#', scss:'#', html:'<>', svg:'◇', sh:'›_', sql:'▦',
-    dockerfile:'◆', env:'•', gitignore:'•', lock:'🔒'
-  };
-  function iconFor(name) {
-    const lower = name.toLowerCase();
-    if (ICONS[lower]) return ICONS[lower];
-    const ext = lower.includes('.') ? lower.split('.').pop() : '';
-    return ICONS[ext] || '•';
-  }
-
-  function render(tree, el, owner, repo, branch, base = '', activePath = '') {
-    Object.entries(tree).sort((a,b) => {
-      const ad = a[1].type === 'tree', bd = b[1].type === 'tree';
-      return ad !== bd ? (ad ? -1 : 1) : a[0].localeCompare(b[0]);
-    }).forEach(([name, node]) => {
-      const path = base ? `${base}/${name}` : name;
-      const div = document.createElement('div');
-      div.className = `item ${node.type === 'tree' ? 'folder' : 'file'}`;
-      div.textContent = name; div.title = path;
-      if (path === activePath) div.classList.add('current');
-      if (node.type !== 'tree') div.style.setProperty('--ghft-icon', `'${iconFor(name)}'`);
-      el.appendChild(div);
-      if (node.type === 'tree') {
-        const children = document.createElement('div'); children.className = 'children'; el.appendChild(children);
-        div.onclick = e => { e.stopPropagation(); div.classList.toggle('open'); };
-        render(node.children, children, owner, repo, branch, path, activePath);
-      } else {
-        div.onclick = e => {
-          const url = `https://github.com/${owner}/${repo}/blob/${encodeURIComponent(branch)}/${path.split('/').map(encodeURIComponent).join('/')}`;
-          if (e.ctrlKey || e.metaKey || e.shiftKey || e.button === 1) window.open(url, '_blank');
-          else location.href = url;
-        };
-      }
-    });
-  }
-
-  function initSearch(allFiles, owner, repo, branch) {
-    const overlay = document.createElement('div'); overlay.id = 'ghft-search-overlay';
-    const box = document.createElement('div'); box.id = 'ghft-search';
-    const top = document.createElement('div'); top.id = 'ghft-search-top';
-    const icon = document.createElement('span'); icon.id = 'ghft-search-icon'; icon.textContent = '⌕';
-    const input = document.createElement('input'); input.placeholder = 'Search files…';
-    const hint = document.createElement('span'); hint.id = 'ghft-search-hint'; hint.textContent = 'ESC';
-    const ul = document.createElement('ul'); top.append(icon,input,hint); box.append(top,ul); overlay.appendChild(box); document.body.appendChild(overlay);
-    let selected = -1;
-    const close = () => { overlay.style.display='none'; input.value=''; ul.innerHTML=''; selected=-1; };
-    const open = () => { overlay.style.display='flex'; input.focus(); };
-    overlay.onclick = e => { if (e.target === overlay) close(); };
-    function updateSelection(items) { items.forEach((item,i)=>item.classList.toggle('selected',i===selected)); if (items[selected]) items[selected].scrollIntoView({block:'nearest'}); }
-    input.oninput = () => {
-      ul.innerHTML=''; selected=-1; const q=input.value.trim().toLowerCase(); if(!q) return;
-      const results=allFiles.filter(f=>f.toLowerCase().includes(q)).sort((a,b)=>{
-        const an=a.toLowerCase().split('/').pop().startsWith(q), bn=b.toLowerCase().split('/').pop().startsWith(q); return an===bn ? a.length-b.length : (an?-1:1);
-      }).slice(0,50);
-      if(!results.length){const empty=document.createElement('div');empty.id='ghft-search-empty';empty.textContent='No matching files';ul.appendChild(empty);return;}
-      results.forEach(f=>{const li=document.createElement('li');li.textContent=`${iconFor(f.split('/').pop())}  ${f}`;li.title=f;li.onclick=()=>{location.href=`https://github.com/${owner}/${repo}/blob/${encodeURIComponent(branch)}/${f.split('/').map(encodeURIComponent).join('/')}`;close();};ul.appendChild(li);});
-    };
-    input.onkeydown=e=>{const items=[...ul.querySelectorAll('li')];if(e.key==='ArrowDown'){e.preventDefault();selected=items.length?(selected+1)%items.length:-1;updateSelection(items)}else if(e.key==='ArrowUp'){e.preventDefault();selected=items.length?(selected-1+items.length)%items.length:-1;updateSelection(items)}else if(e.key==='Enter'&&selected>=0&&items[selected])items[selected].click();else if(e.key==='Escape'){e.preventDefault();close();}};
-    return { open, close };
-  }
-
-  function setBodyPadding() { document.body.style.paddingLeft = collapsed ? '0' : `${sidebarWidth}px`; }
-
-  async function init() {
-    if (!isRepositoryPage()) { destroy(); return; }
-    const ctx = getRepoContext();
-    const activePath = location.pathname.match(/^\/[^/]+\/[^/]+\/blob\/[^/]+\/(.*)$/)?.[1] || '';
-    const key = `${ctx.owner}/${ctx.repo}`;
-    if (currentKey === key && document.getElementById('ghft')) return;
-    destroy(); currentKey = key; setBodyPadding();
-
-    const status = document.createElement('div'); status.id='ghft-status-global';
-    const setStatus = (text, warning=false) => { if (document.getElementById('ghft-status')) { const el=document.getElementById('ghft-status'); el.textContent=text; el.style.display=text?'block':'none'; el.classList.toggle('ghft-error',warning); } };
-    try {
-      const result = await loadTree(ctx.owner, ctx.repo, setStatus);
-      if (currentKey !== key) return;
-      const tree = buildTree(result.tree);
-      const allFiles = result.tree.filter(i=>i.type==='blob').map(i=>i.path);
-      const search = initSearch(allFiles,ctx.owner,ctx.repo,result.branch);
-      if (!collapsed) {
-        const sidebar=document.createElement('div'); sidebar.id='ghft';
-        const header=document.createElement('div'); header.id='ghft-header';
-        const toggle=document.createElement('button'); toggle.id='ghft-toggle'; toggle.textContent='‹'; toggle.title='Collapse sidebar'; toggle.onclick=()=>{localStorage.setItem(CONFIG.collapseKey,'1');location.reload();};
-        const title=document.createElement('div'); title.id='ghft-title';
-        const repoName=document.createElement('div'); repoName.id='ghft-repo'; repoName.textContent=`${ctx.owner} / ${ctx.repo}`;
-        const branchName=document.createElement('div'); branchName.id='ghft-branch'; branchName.textContent=`⎇ ${result.branch}${result.cached?' · cached':''}`; title.append(repoName,branchName);
-        const searchBtn=document.createElement('button'); searchBtn.id='ghft-search-btn'; searchBtn.textContent='⌕'; searchBtn.title='Search (Ctrl/Cmd + P)'; searchBtn.onclick=search.open;
-        const refresh=document.createElement('button'); refresh.id='ghft-refresh-btn'; refresh.textContent='↻'; refresh.title='Refresh tree'; refresh.onclick=()=>{localStorage.removeItem(cacheKey(ctx.owner,ctx.repo,result.branch));location.reload();};
-        header.append(toggle,title,searchBtn,refresh);
-        const body=document.createElement('div'); body.id='ghft-body'; render(tree,body,ctx.owner,ctx.repo,result.branch,'',activePath);
-        const statusBar=document.createElement('div'); statusBar.id='ghft-status'; sidebar.append(header,body,statusBar);
-        const resize=document.createElement('div'); resize.id='ghft-resize'; resize.onmousedown=e=>{e.preventDefault();document.body.style.cursor='ew-resize';const move=ev=>{sidebarWidth=clamp(ev.clientX,CONFIG.minWidth,CONFIG.maxWidth);sidebar.style.width=`${sidebarWidth}px`;setBodyPadding()};const up=()=>{localStorage.setItem(CONFIG.widthKey,String(sidebarWidth));document.body.style.cursor='';document.removeEventListener('mousemove',move);document.removeEventListener('mouseup',up)};document.addEventListener('mousemove',move);document.addEventListener('mouseup',up)};
-        sidebar.appendChild(resize); document.body.appendChild(sidebar); if(result.truncated)setStatus('Large repository: some files may be missing. Click ↻ to refresh.',true);
-      }
-      const floatBtn=document.createElement('button'); floatBtn.id='ghft-float-btn'; floatBtn.textContent='›'; floatBtn.title='Open file tree'; floatBtn.onclick=()=>{localStorage.setItem(CONFIG.collapseKey,'0');location.reload()}; document.body.appendChild(floatBtn);
-      document.addEventListener('keydown', window.__ghftKeyHandler = e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='p'){e.preventDefault();search.open()}}, { once:false });
-    } catch(err) {
-      console.error('[GitHub File Tree]',err);
-      const existing=document.getElementById('ghft'); if(existing){const body=existing.querySelector('#ghft-body');body.innerHTML='';const error=document.createElement('div');error.style.cssText='padding:16px;color:var(--ghft-danger);font-size:13px';error.textContent=`Unable to load file tree: ${err.message}`;body.appendChild(error)}
-    }
-  }
-
-  function scheduleInit() { clearTimeout(navigationTimer); navigationTimer=setTimeout(init,80); }
-  window.addEventListener('popstate',scheduleInit);
-  document.addEventListener('turbo:load',scheduleInit);
-  document.addEventListener('pjax:end',scheduleInit);
-  document.addEventListener('turbo:before-cache',destroy);
-  scheduleInit();
+  function scheduleInit(){clearTimeout(navigationTimer);navigationTimer=setTimeout(init,100);}
+  document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='p'&&searchOpen){e.preventDefault();searchOpen.open();}});
+  window.addEventListener('popstate',scheduleInit);document.addEventListener('turbo:load',scheduleInit);document.addEventListener('pjax:end',scheduleInit);document.addEventListener('turbo:before-cache',destroy);scheduleInit();
 })();
